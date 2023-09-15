@@ -155,6 +155,10 @@ UPROGS=\
 	$U/_wc\
 	$U/_zombie\
 
+UPROGS +=\
+	$U/_sleep\
+	$U/_pingpong\
+	$U/_find\
 
 ifeq ($(LAB),syscall)
 UPROGS += \

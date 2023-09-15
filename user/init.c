@@ -29,6 +29,7 @@ int main(void) {
       exit(1);
     }
     if (pid == 0) {
+      printf("[210110527] start sh through exec\n");
       exec("sh", argv);
       printf("init: exec sh failed\n");
       exit(1);
