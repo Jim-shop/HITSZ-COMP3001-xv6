@@ -18,10 +18,13 @@ uint64 sys_getpid(void) { return myproc()->pid; }
 
 uint64 sys_fork(void) { return fork(); }
 
+// Exp 2
 uint64 sys_wait(void) {
   uint64 p;
+  int flag;
   if (argaddr(0, &p) < 0) return -1;
-  return wait(p);
+  if (argint(1, &flag) < 0) return -1;
+  return wait(p, flag);
 }
 
 uint64 sys_sbrk(void) {
@@ -79,5 +82,13 @@ uint64 sys_rename(void) {
   struct proc *p = myproc();
   memmove(p->name, name, len);
   p->name[len] = '\0';
+  return 0;
+}
+
+// Exp 3
+uint64 sys_yield(void) {
+  struct proc *p = myproc();
+  printf("start to yield, user pc %p\n", p->trapframe->epc);
+  yield();
   return 0;
 }

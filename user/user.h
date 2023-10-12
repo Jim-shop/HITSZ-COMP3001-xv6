@@ -24,6 +24,7 @@ char* sbrk(int);
 int sleep(int);
 int uptime(void);
 int rename(const char*);
+int yield(void); // Exp 3
 
 // ulib.c
 int stat(const char*, struct stat*);

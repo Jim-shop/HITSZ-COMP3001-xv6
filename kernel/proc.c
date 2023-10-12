@@ -291,11 +291,40 @@ void reparent(struct proc *p) {
   }
 }
 
+// Exp 1
+static inline char *proc_state_to_string(enum procstate state) {
+  switch (state) {
+    case UNUSED:
+      return "unused";
+    case SLEEPING:
+      return "sleeping";
+    case RUNNABLE:
+      return "runnable";
+    case RUNNING:
+      return "running";
+    case ZOMBIE:
+      return "zombie";
+    default:
+      return "";
+  }
+}
+
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait().
 void exit(int status) {
   struct proc *p = myproc();
+
+  // Exp 1
+  exit_info("proc %d exit, parent pid %d, name %s, state %s\n", p->pid, p->parent->pid, p->parent->name,
+            proc_state_to_string(p->parent->state));
+  int child_num = 0;
+  for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
+    if (pp->parent == p) {
+      exit_info("proc %d exit, child %d, pid %d, name %s, state %s\n", p->pid, child_num++, pp->pid, pp->name,
+                proc_state_to_string(pp->state));
+    }
+  }
 
   if (p == initproc) panic("init exiting");
 
@@ -354,9 +383,10 @@ void exit(int status) {
   panic("zombie exit");
 }
 
+// Exp 2
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
-int wait(uint64 addr) {
+int wait(uint64 addr, int flag) {
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
@@ -400,8 +430,15 @@ int wait(uint64 addr) {
       return -1;
     }
 
-    // Wait for a child to exit.
-    sleep(p, &p->lock);  // DOC: wait-sleep
+    // Exp 2
+    if (flag) {
+      // non-blocking wait
+      release(&p->lock);
+      return -1;
+    } else {
+      // Wait for a child to exit.
+      sleep(p, &p->lock);  // DOC: wait-sleep
+    }
   }
 }
 
