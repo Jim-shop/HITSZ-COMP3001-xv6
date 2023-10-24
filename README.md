@@ -4,5 +4,5 @@
 
 - [x] Lab1: util
 - [x] Lab2: syscall
-- [ ] Lab3: lock
+- [x] Lab3: lock
 - [ ] Lab4: pgtbl
