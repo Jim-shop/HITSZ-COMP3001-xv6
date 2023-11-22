@@ -34,6 +34,7 @@ void procinit(void) {
     // guard page.
     char *pa = kalloc();
     if (pa == 0) panic("kalloc");
+    p->kstack_pa = (uint64)pa;
     uint64 va = KSTACK((int)(p - proc));
     kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
     p->kstack = va;
@@ -97,6 +98,13 @@ static struct proc *allocproc(void) {
 found:
   p->pid = allocpid();
 
+  // Allocate a kernel pagetable.
+  if ((p->kpgtbl = kthreadvminit()) == 0) {
+    release(&p->lock);
+    return 0;
+  }
+  kthreadvmmap(p->kpgtbl, p->kstack, p->kstack_pa, PGSIZE, PTE_R | PTE_W);
+
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
     release(&p->lock);
@@ -110,7 +118,7 @@ found:
     release(&p->lock);
     return 0;
   }
-
+  
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -118,6 +126,19 @@ found:
   p->context.sp = p->kstack + PGSIZE;
 
   return p;
+}
+
+void kthread_freepagetable(pagetable_t kpgtbl) {
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = kpgtbl[i];
+    if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      kthread_freepagetable((pagetable_t)child);
+      kpgtbl[i] = 0;
+    }
+  }
+  kfree((void *)kpgtbl);
 }
 
 // free a proc structure and the data hanging from it,
@@ -128,6 +149,12 @@ static void freeproc(struct proc *p) {
   p->trapframe = 0;
   if (p->pagetable) proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  if (p->kpgtbl) {
+    pagetable_t kpgtbl0 = (pagetable_t)PTE2PA(p->kpgtbl[0]);
+    for (int i = 0; i < 96; i++) kpgtbl0[i] = 0;  // skip user pages
+    kthread_freepagetable(p->kpgtbl);
+  }
+  p->kpgtbl = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -191,6 +218,7 @@ void userinit(void) {
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
+  sync_pagetable(p->kpgtbl, p->pagetable);
   p->sz = PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
@@ -220,6 +248,7 @@ int growproc(int n) {
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
+  sync_pagetable(p->kpgtbl, p->pagetable);
   return 0;
 }
 
@@ -241,6 +270,7 @@ int fork(void) {
     release(&np->lock);
     return -1;
   }
+  sync_pagetable(np->kpgtbl, np->pagetable);
   np->sz = p->sz;
 
   np->parent = p;
@@ -430,10 +460,17 @@ void scheduler(void) {
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        // switch kernel thread pagetable
+        w_satp(MAKE_SATP(p->kpgtbl));
+        sfence_vma();
+        // switch context
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
+
+        // switch to kernel pagetable
+        kvminithart();
         c->proc = 0;
 
         found = 1;

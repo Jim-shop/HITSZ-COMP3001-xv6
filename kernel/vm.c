@@ -45,6 +45,24 @@ void kvminit() {
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
+/*
+ * copy global page table for a kernel thread.
+ */
+pagetable_t kthreadvminit() {
+  pagetable_t kthread_pgtbl = (pagetable_t)kalloc();
+  if (kthread_pgtbl == 0) return 0;
+  memset(kthread_pgtbl, 0, PGSIZE);
+
+  kthreadvmmap(kthread_pgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);      // UART
+  kthreadvmmap(kthread_pgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);  // mmio disk
+  // CLINT mapping is useless after boot and removed.
+  kthreadvmmap(kthread_pgtbl, PLIC, PLIC, 0x400000, PTE_R | PTE_W);                                   // PLIC
+  kthreadvmmap(kthread_pgtbl, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);           // kernel text
+  kthreadvmmap(kthread_pgtbl, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext, PTE_R | PTE_W);  // kernel data
+  kthreadvmmap(kthread_pgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);                 // trampoline
+  return kthread_pgtbl;
+}
+
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
 void kvminithart() {
@@ -102,6 +120,12 @@ uint64 walkaddr(pagetable_t pagetable, uint64 va) {
 // does not flush TLB or enable paging.
 void kvmmap(uint64 va, uint64 pa, uint64 sz, int perm) {
   if (mappages(kernel_pagetable, va, sz, pa, perm) != 0) panic("kvmmap");
+}
+
+// add a mapping to a kernel thread page table.
+// does not flush TLB or enable paging.
+void kthreadvmmap(pagetable_t pgtbl, uint64 va, uint64 pa, uint64 sz, int perm) {
+  if (mappages(pgtbl, va, sz, pa, perm) != 0) panic("kthreadvmmap");
 }
 
 // translate a kernel virtual address to
@@ -316,21 +340,7 @@ int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len) {
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
 int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
-  uint64 n, va0, pa0;
-
-  while (len > 0) {
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) return -1;
-    n = PGSIZE - (srcva - va0);
-    if (n > len) n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -338,38 +348,7 @@ int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
 // until a '\0', or max.
 // Return 0 on success, -1 on error.
 int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max) {
-  uint64 n, va0, pa0;
-  int got_null = 0;
-
-  while (got_null == 0 && max > 0) {
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) return -1;
-    n = PGSIZE - (srcva - va0);
-    if (n > max) n = max;
-
-    char *p = (char *)(pa0 + (srcva - va0));
-    while (n > 0) {
-      if (*p == '\0') {
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
-
-    srcva = va0 + PGSIZE;
-  }
-  if (got_null) {
-    return 0;
-  } else {
-    return -1;
-  }
+  return copyinstr_new(pagetable, dst, srcva, max);
 }
 
 // check if use global kpgtbl or not
@@ -378,4 +357,69 @@ int test_pagetable() {
   uint64 gsatp = MAKE_SATP(kernel_pagetable);
   printf("test_pagetable: %d\n", satp != gsatp);
   return satp != gsatp;
+}
+
+static inline const char *pteFlagStr(pte_t *pte) {
+  switch ((*pte >> 1) & 0b01111) {
+    case 0b0000:
+      return "----";
+    case 0b0001:
+      return "r---";
+    case 0b0010:
+      return "-w--";
+    case 0b0011:
+      return "rw--";
+    case 0b0100:
+      return "--x-";
+    case 0b0101:
+      return "r-x-";
+    case 0b0110:
+      return "-wx-";
+    case 0b0111:
+      return "rwx-";
+    case 0b1000:
+      return "---u";
+    case 0b1001:
+      return "r--u";
+    case 0b1010:
+      return "-w-u";
+    case 0b1011:
+      return "rw-u";
+    case 0b1100:
+      return "--xu";
+    case 0b1101:
+      return "r-xu";
+    case 0b1110:
+      return "-wxu";
+    case 0b1111:
+      return "rwxu";
+    default:
+      return "";
+  }
+}
+
+void vmprint(pagetable_t pgtbl) {
+  printf("page table %p\n", pgtbl);
+  for (uint64 idx2 = 0; idx2 < (1 << 9); idx2++) {
+    pte_t *pte2 = &pgtbl[idx2];
+    if (*pte2 & PTE_V) {
+      pagetable_t pa2 = (pagetable_t)PTE2PA(*pte2);
+      printf("||idx: %d: pa: %p, flags: %s\n", idx2, pa2, pteFlagStr(pte2));
+      for (uint64 idx1 = 0; idx1 < (1 << 9); idx1++) {
+        pte_t *pte1 = &pa2[idx1];
+        if (*pte1 & PTE_V) {
+          pagetable_t pa1 = (pagetable_t)PTE2PA(*pte1);
+          printf("||   ||idx: %d: pa: %p, flags: %s\n", idx1, pa1, pteFlagStr(pte1));
+          for (uint64 idx0 = 0; idx0 < (1 << 9); idx0++) {
+            pte_t *pte0 = &pa1[idx0];
+            if (*pte0 & PTE_V) {
+              uint64 pa0 = PTE2PA(*pte0);
+              uint64 va = ((idx0) << 12) | ((idx1) << 21) | ((idx2) << 30);
+              printf("||   ||   ||idx: %d: va: %p -> pa: %p, flags: %s\n", idx0, va, pa0, pteFlagStr(pte0));
+            }
+          }
+        }
+      }
+    }
+  }
 }
